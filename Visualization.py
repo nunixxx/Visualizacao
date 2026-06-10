@@ -4,8 +4,8 @@ import json
 import branca.colormap as cm
 
 # 1. Carregar e limpar dados
-with open('data.json', 'r', encoding='utf-8') as f:
-    df = pd.read_json(f)
+with open('datas/demografia_RS.json', 'r', encoding='utf-8') as f:
+    df = pd.read_json(f) 
 
 # Conversão de tipos
 df['ibge'] = df['ibge'].astype(str).str.zfill(7)
@@ -14,7 +14,7 @@ df['pop_2024'] = df['Demografia Total 2024 (-)'].str.replace('.', '', regex=Fals
 df['crescimento'] = ((df['pop_2024'] / df['pop_2000']) - 1) * 100
 
 # 2. Carregar a malha (certifique-se que malha_rs.json está na pasta)
-with open('malha_rs.json', 'r', encoding='utf-8') as f:
+with open('datas/malha_rs.json', 'r', encoding='utf-8') as f:
     malha_rs = json.load(f)
 
 # 3. Criar dicionário para busca rápida
