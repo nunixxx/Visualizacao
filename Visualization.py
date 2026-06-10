@@ -7,6 +7,7 @@ import json
 import folium
 import pandas as pd
 import branca.colormap as cm
+from   branca.element import Element
 
 
 # ── Configurações ──────────────────────────────────────────────────────────────
@@ -63,12 +64,19 @@ def enriquecer_geojson(malha: dict, df: pd.DataFrame) -> tuple[dict, int]:
     """
     lookup = df.set_index("ibge").to_dict("index")
     sem_match = 0
+    anos = [str(a) for a in range(2000, 2024)]
 
     for feature in malha["features"]:
         cod = feature["properties"].get("codarea", "")
         row = lookup.get(cod)
 
         if row:
+
+            serie = [
+                float(str(row[f"Demografia Total {ano} (-)"]).replace(".", ""))
+                for ano in anos
+            ]
+
             feature["properties"].update({
                 "Município":     row["Município"],
                 "crescimento":   round(row["crescimento"], 2),
@@ -77,8 +85,22 @@ def enriquecer_geojson(malha: dict, df: pd.DataFrame) -> tuple[dict, int]:
                 "cresc_fmt":     f"{row['crescimento']:+.2f}%",
                 "pop_2024_fmt":  f"{int(row['pop_2024']):,}".replace(",", "."),
                 "pop_2000_fmt":  f"{int(row['pop_2000']):,}".replace(",", "."),
+                "serie_demo":    ",".join(map(str, serie)),
                 "tem_dados":     True,
             })
+            
+            feature["properties"]["tooltip_html"] = f"""
+                    <b>{row['Município']}</b><br>
+                    Crescimento: {row['crescimento']:+.2f}%<br>
+                    Pop. 2000: {int(row['pop_2000']):,}<br>
+                    Pop. 2024: {int(row['pop_2024']):,}<br>
+                    <br>
+                    <div
+                        class="sparkline"
+                        data-values="{feature['properties']['serie_demografica']}"
+                        style="width:220px;height:50px">
+                    </div>
+                    """
         else:
             feature["properties"]["tem_dados"] = False
             sem_match += 1
@@ -117,6 +139,68 @@ def criar_colormap(df: pd.DataFrame) -> cm.LinearColormap:
 def construir_mapa(malha: dict, colormap: cm.LinearColormap) -> folium.Map:
     m = folium.Map(location=MAP_CENTER, zoom_start=MAP_ZOOM, tiles="CartoDB positron")
 
+    spark_js = """
+    <script>
+
+    function drawSparkline(el){
+
+        const values =
+            el.dataset.values.split(',').map(Number);
+
+        const w = 220;
+        const h = 50;
+        const pad = 4;
+
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+
+        let pts = "";
+
+        values.forEach((v,i)=>{
+
+            const x =
+                pad +
+                i*(w-2*pad)/(values.length-1);
+
+            const y =
+                h-pad -
+                ((v-min)/(max-min || 1))*(h-2*pad);
+
+            pts += x + "," + y + " ";
+        });
+
+        el.innerHTML =
+            `<svg width="${w}" height="${h}">
+                <polyline
+                    points="${pts}"
+                    fill="none"
+                    stroke="#1a9850"
+                    stroke-width="2"/>
+            </svg>`;
+    }
+
+    document.addEventListener("mouseover", () => {
+
+        document
+            .querySelectorAll(".sparkline")
+            .forEach(el => {
+
+                if(!el.dataset.rendered){
+
+                    drawSparkline(el);
+
+                    el.dataset.rendered = "1";
+                }
+            });
+    });
+
+    </script>
+    """
+
+    m.get_root().html.add_child(
+        Element(spark_js)
+    )
+
     def estilo(feature):
         props = feature["properties"]
         if props.get("tem_dados"):
@@ -138,11 +222,11 @@ def construir_mapa(malha: dict, colormap: cm.LinearColormap) -> folium.Map:
         style_function=estilo,
         highlight_function=highlight,
         tooltip=folium.GeoJsonTooltip(
-            fields=["Município", "cresc_fmt", "pop_2024_fmt", "pop_2000_fmt"],
-            aliases=["Município:", "Crescimento:", "Pop. 2024:", "Pop. 2000:"],
-            localize=True,
-            sticky=True,
-        ),
+                fields=["tooltip_html"],
+                aliases=[""],
+                labels=False,
+                sticky=True
+            )
     ).add_to(m)
 
     colormap.add_to(m)
