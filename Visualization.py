@@ -7,7 +7,9 @@ import json
 import folium
 import pandas as pd
 import branca.colormap as cm
-from   branca.element import Element
+from folium import MacroElement
+from jinja2 import Template
+from pathlib import Path
 
 
 # ── Configurações ──────────────────────────────────────────────────────────────
@@ -19,6 +21,10 @@ OUTPUT     = "mapa_crescimento_demografico.html"
 MAP_CENTER = [-30.03, -51.22]
 MAP_ZOOM   = 7
 
+ANOS = list(range(2000, 2025))  # 2000..2024
+
+JS_PATH = Path(__file__).with_name("Sparkline.js")
+
 
 # ── 1. Carregar e preparar dados ───────────────────────────────────────────────
 
@@ -27,26 +33,25 @@ def carregar_dados(path: str) -> pd.DataFrame:
     with open(path, encoding="utf-8") as f:
         df = pd.read_json(f)
 
-    # Garante IBGE como string de 7 dígitos
     df["ibge"] = df["ibge"].astype(str).str.zfill(7)
 
-    # Converte populações (formato BR: ponto como separador de milhar)
-    for col in ["Demografia Total 2000 (-)", "Demografia Total 2024 (-)"]:
-        df[col] = (
-            df[col]
-            .astype(str)
-            .str.replace(".", "", regex=False)
-            .astype(float)
-        )
+    for ano in ANOS:
+        col = f"Demografia Total {ano} (-)"
+        if col in df.columns:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace(".", "", regex=False)
+                .astype(float)
+            )
 
     df = df.rename(columns={
-        "Demografia Total 2000 (-)": "pop_2000",
-        "Demografia Total 2024 (-)": "pop_2024",
+        f"Demografia Total {ano} (-)": f"pop_{ano}"
+        for ano in ANOS
+        if f"Demografia Total {ano} (-)" in df.columns
     })
 
-    # Crescimento percentual 2000–2024
     df["crescimento"] = (df["pop_2024"] / df["pop_2000"] - 1) * 100
-
     return df
 
 
@@ -59,48 +64,32 @@ def carregar_malha(path: str) -> dict:
 
 def enriquecer_geojson(malha: dict, df: pd.DataFrame) -> tuple[dict, int]:
     """
-    Anexa dados de crescimento às propriedades de cada feature.
-    Retorna a malha enriquecida e a contagem de municípios sem match.
+    Anexa crescimento e série temporal (pop_serie) às propriedades de cada feature.
     """
     lookup = df.set_index("ibge").to_dict("index")
     sem_match = 0
-    anos = [str(a) for a in range(2000, 2024)]
 
     for feature in malha["features"]:
         cod = feature["properties"].get("codarea", "")
         row = lookup.get(cod)
 
         if row:
-
-            serie = [
-                float(str(row[f"Demografia Total {ano} (-)"]).replace(".", ""))
-                for ano in anos
+            pop_serie = [
+                int(row[f"pop_{ano}"])
+                for ano in ANOS
+                if f"pop_{ano}" in row and row[f"pop_{ano}"] == row[f"pop_{ano}"]
             ]
-
             feature["properties"].update({
-                "Município":     row["Município"],
-                "crescimento":   round(row["crescimento"], 2),
-                "pop_2000":      int(row["pop_2000"]),
-                "pop_2024":      int(row["pop_2024"]),
-                "cresc_fmt":     f"{row['crescimento']:+.2f}%",
-                "pop_2024_fmt":  f"{int(row['pop_2024']):,}".replace(",", "."),
-                "pop_2000_fmt":  f"{int(row['pop_2000']):,}".replace(",", "."),
-                "serie_demo":    ",".join(map(str, serie)),
-                "tem_dados":     True,
+                "Município":    row["Município"],
+                "crescimento":  round(row["crescimento"], 2),
+                "pop_2000":     int(row["pop_2000"]),
+                "pop_2024":     int(row["pop_2024"]),
+                "cresc_fmt":    f"{row['crescimento']:+.2f}%",
+                "pop_2024_fmt": f"{int(row['pop_2024']):,}".replace(",", "."),
+                "pop_2000_fmt": f"{int(row['pop_2000']):,}".replace(",", "."),
+                "pop_serie":    pop_serie,
+                "tem_dados":    True,
             })
-            
-            feature["properties"]["tooltip_html"] = f"""
-                    <b>{row['Município']}</b><br>
-                    Crescimento: {row['crescimento']:+.2f}%<br>
-                    Pop. 2000: {int(row['pop_2000']):,}<br>
-                    Pop. 2024: {int(row['pop_2024']):,}<br>
-                    <br>
-                    <div
-                        class="sparkline"
-                        data-values="{feature['properties']['serie_demografica']}"
-                        style="width:220px;height:50px">
-                    </div>
-                    """
         else:
             feature["properties"]["tem_dados"] = False
             sem_match += 1
@@ -111,136 +100,73 @@ def enriquecer_geojson(malha: dict, df: pd.DataFrame) -> tuple[dict, int]:
 # ── 3. Construir escala de cores divergente ────────────────────────────────────
 
 def criar_colormap(df: pd.DataFrame) -> cm.LinearColormap:
-    """
-    Escala divergente centrada em 0%:
-      vermelho  → crescimento negativo
-      amarelo   → estável (~0%)
-      verde     → crescimento positivo
-    """
     vmin = df["crescimento"].min()
     vmax = df["crescimento"].max()
-
-    # Normaliza o ponto médio (0%) na escala
-    total = vmax - vmin
-    mid   = (0 - vmin) / total if total > 0 else 0.5
-
-    colormap = cm.LinearColormap(
-        colors=["#d73027", "#fee08b", "#1a9850"],  # vermelho → amarelo → verde
+    return cm.LinearColormap(
+        colors=["#d73027", "#fee08b", "#1a9850"],
         index=[vmin, 0, vmax],
         vmin=vmin,
         vmax=vmax,
         caption="Crescimento Demográfico 2000–2024 (%)",
     )
-    return colormap
 
 
-# ── 4. Montar o mapa ───────────────────────────────────────────────────────────
+# ── 4. MacroElement: tooltip com sparkline ────────────────────────────────────
+
+class SparklineTooltip(MacroElement):
+    """
+    Injeta o conteúdo de sparkline_tooltip.js no HTML final do Folium,
+    substituindo os placeholders __GEOJSON_VAR__ e __ANOS__ pelos valores
+    concretos do layer e do intervalo de anos.
+    """
+
+    _template = Template("""
+    {% macro script(this, kwargs) %}
+    {{ this.js_code }}
+    {% endmacro %}
+    """)
+
+    def __init__(self, geojson_varname: str, anos: list[int], js_path: Path = JS_PATH):
+        super().__init__()
+        self._name = "Sparkline"
+
+        raw = js_path.read_text(encoding="utf-8")
+        self.js_code = (
+            raw
+            .replace("__GEOJSON_VAR__", geojson_varname)
+            .replace("__ANOS__",        json.dumps(anos))
+        )
+
+
+# ── 5. Montar o mapa ───────────────────────────────────────────────────────────
 
 def construir_mapa(malha: dict, colormap: cm.LinearColormap) -> folium.Map:
     m = folium.Map(location=MAP_CENTER, zoom_start=MAP_ZOOM, tiles="CartoDB positron")
 
-    spark_js = """
-    <script>
-
-    function drawSparkline(el){
-
-        const values =
-            el.dataset.values.split(',').map(Number);
-
-        const w = 220;
-        const h = 50;
-        const pad = 4;
-
-        const min = Math.min(...values);
-        const max = Math.max(...values);
-
-        let pts = "";
-
-        values.forEach((v,i)=>{
-
-            const x =
-                pad +
-                i*(w-2*pad)/(values.length-1);
-
-            const y =
-                h-pad -
-                ((v-min)/(max-min || 1))*(h-2*pad);
-
-            pts += x + "," + y + " ";
-        });
-
-        el.innerHTML =
-            `<svg width="${w}" height="${h}">
-                <polyline
-                    points="${pts}"
-                    fill="none"
-                    stroke="#1a9850"
-                    stroke-width="2"/>
-            </svg>`;
-    }
-
-    document.addEventListener("mouseover", () => {
-
-        document
-            .querySelectorAll(".sparkline")
-            .forEach(el => {
-
-                if(!el.dataset.rendered){
-
-                    drawSparkline(el);
-
-                    el.dataset.rendered = "1";
-                }
-            });
-    });
-
-    </script>
-    """
-
-    m.get_root().html.add_child(
-        Element(spark_js)
-    )
-
     def estilo(feature):
         props = feature["properties"]
-        if props.get("tem_dados"):
-            cor = colormap(props["crescimento"])
-        else:
-            cor = "#cccccc"
-        return {
-            "fillColor":   cor,
-            "color":       "#555555",
-            "weight":      0.4,
-            "fillOpacity": 0.75,
-        }
+        cor = colormap(props["crescimento"]) if props.get("tem_dados") else "#cccccc"
+        return {"fillColor": cor, "color": "#555555", "weight": 0.4, "fillOpacity": 0.75}
 
     def highlight(feature):
         return {"weight": 2, "color": "#333333", "fillOpacity": 0.9}
 
-    folium.GeoJson(
-        malha,
-        style_function=estilo,
-        highlight_function=highlight,
-        tooltip=folium.GeoJsonTooltip(
-                fields=["tooltip_html"],
-                aliases=[""],
-                labels=False,
-                sticky=True
-            )
-    ).add_to(m)
+    gj = folium.GeoJson(malha, style_function=estilo, highlight_function=highlight)
+    gj.add_to(m)
 
+    SparklineTooltip(geojson_varname=gj.get_name(), anos=ANOS).add_to(m)
     colormap.add_to(m)
     return m
 
 
-# ── 5. Execução principal ──────────────────────────────────────────────────────
+# ── 6. Execução principal ──────────────────────────────────────────────────────
 
 def main():
     print("Carregando dados...")
     df    = carregar_dados(DATA_PATH)
     malha = carregar_malha(MALHA_PATH)
 
-    print(f"  {len(df)} municípios no CSV | crescimento: "
+    print(f"  {len(df)} municípios | crescimento: "
           f"{df['crescimento'].min():.1f}% a {df['crescimento'].max():.1f}%")
 
     malha, sem_match = enriquecer_geojson(malha, df)
