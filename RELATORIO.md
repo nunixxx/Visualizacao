@@ -29,8 +29,8 @@
 >
 > - Indique abaixo onde está, dentro deste repositório, o código-fonte usado para gerar a visualização.
 
-- **Arquivo principal**: <mark>`./Visualization.py`</mark>
-- **Arquivos complementares (se houver)**: <mark>`./Sparkline.js , ./datas/*.json`</mark>
+- **Arquivo principal**: [./Visualization.py](Visualization.py)
+- **Arquivos complementares (se houver)**: [./Sparkline.js](Sparkline.js) , [./datas/*.json](./datas)
 
 ## Imagem da visualização gerada
 
