@@ -41,7 +41,7 @@
 
 ![Visualização resultante](Visualizacao.png)
 
-Ao executar o Visualization.py ele ira gerar um html(<mark>`mapa_crescimento_demografico.html`</mark>)
+Ao executar o Visualization.py ele ira gerar um html([mapa_crescimento_demografico.html](mapa_crescimento_demografico.html))
 ## Descrição da visualização
 
 ### Legenda (*caption*)
